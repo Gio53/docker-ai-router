@@ -22,12 +22,13 @@ from fastapi.responses import JSONResponse, Response, StreamingResponse
 
 log = logging.getLogger("docker-ai-router")
 
-# Force Z.ai for Pelican Panel / Wings game-server provisioning only.
-# Media stack (Lidarr, Jellyfin, etc.) stays on FreeLLMAPI unless Laya score >= 2.
+# Force Z.ai for Pelican/Wings game servers plus Immich/Nextcloud work.
+# Lidarr and other *arr media ops stay on FreeLLMAPI unless Laya score >= 2.
 DEFAULT_FORCE_COMPLEX = (
     "pelican,wings,pelican panel,pelican-eggs,yolks,"
     "minecraft server,game server,create minecraft,new minecraft,"
-    "install egg,minecraft egg,server allocation"
+    "install egg,minecraft egg,server allocation,"
+    "immich,nextcloud"
 )
 
 # The English checkpoint fits 512 tokens, including the question text.
