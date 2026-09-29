@@ -22,10 +22,15 @@ from fastapi.responses import JSONResponse, Response, StreamingResponse
 
 log = logging.getLogger("docker-ai-router")
 
-# router_questions difficulty levels: 0 trivial, 1 easy, 2 moderate, 3 hard.
-# Moderate and hard match multi-step debugging, review, and root-cause work.
-COMPLEX_SCORE_AT = 2.0
-COMPLEX_TOOLS_AT = 0.5
+# Default force-complex phrases for homelab / multi-step ops that Laya often
+# underscores as "easy" even though FreeLLMAPI struggles with them.
+DEFAULT_FORCE_COMPLEX = (
+    "minecraft,docker,proxmox,lidarr,sonarr,radarr,plex,jellyfin,"
+    "container,compose,portainer,nginx,caddy,traefik,reverse proxy,"
+    "firewall,ufw,iptables,wireguard,tailscale,vpn,"
+    "setup server,install server,deploy,systemd,lxc,vm,"
+    "port forward,open port,fix port,bind mount,volume"
+)
 
 # The English checkpoint fits 512 tokens, including the question text.
 # Classification sees only this excerpt. The upstream call gets the full body.
@@ -47,6 +52,21 @@ HOP_BY_HOP = {
 }
 
 REQUIRED_ENV = ("FREE_LLM_API_KEY", "FREE_LLM_BASE_URL", "ZAI_API_KEY")
+
+
+def _parse_float(name: str, default: float) -> float:
+    raw = os.environ.get(name)
+    if raw is None or raw == "":
+        return default
+    try:
+        return float(raw)
+    except ValueError as exc:
+        raise SystemExit(f"Invalid {name}: {exc}") from exc
+
+
+def _parse_keywords(raw: str | None) -> tuple[str, ...]:
+    source = DEFAULT_FORCE_COMPLEX if raw is None else raw
+    return tuple(part.strip().lower() for part in source.split(",") if part.strip())
 
 
 class Settings:
@@ -77,6 +97,13 @@ class Settings:
         except ValueError as exc:
             raise SystemExit(f"Invalid ZAI_MAX_TOKENS: {exc}") from exc
 
+        # Laya score 0 trivial, 1 easy, 2 moderate, 3 hard. 1.5 catches "setup" work.
+        self.complex_score_at = _parse_float("ROUTER_COMPLEX_SCORE_AT", 1.5)
+        self.complex_tools_at = _parse_float("ROUTER_COMPLEX_TOOLS_AT", 0.5)
+        # Empty string disables keyword overrides; unset uses DEFAULT_FORCE_COMPLEX.
+        self.force_complex_keywords = _parse_keywords(
+            os.environ.get("ROUTER_FORCE_COMPLEX_KEYWORDS")
+        )
 
 settings: Settings | None = None
 agent: Any = None
@@ -129,8 +156,24 @@ def latest_user_text(messages: list) -> str:
     return ""
 
 
+def force_complex_match(text: str) -> str | None:
+    """Return the matched keyword if ops/setup text should always use Z.ai."""
+    assert settings is not None
+    lowered = text.lower()
+    for keyword in settings.force_complex_keywords:
+        if keyword in lowered:
+            return keyword
+    return None
+
+
 def classify(text: str) -> str:
     """Return 'simple' or 'complex'. Failures route to the complex backend."""
+    assert settings is not None
+    matched = force_complex_match(text)
+    if matched:
+        log.info("classified tier=complex reason=keyword match=%r chars=%d", matched, len(text))
+        return "complex"
+
     excerpt = excerpt_for_classifier(text)
     try:
         result = agent.predict({"request": excerpt}, questions)
@@ -143,15 +186,19 @@ def classify(text: str) -> str:
             return "complex"
         tools_score = float(needs_tools.get("noul") or 0.0)
         score_value = float(score)
-        if score_value >= COMPLEX_SCORE_AT or tools_score >= COMPLEX_TOOLS_AT:
+        if (
+            score_value >= settings.complex_score_at
+            or tools_score >= settings.complex_tools_at
+        ):
             tier = "complex"
         else:
             tier = "simple"
         log.info(
-            "classified tier=%s difficulty=%.2f needs_tools=%.2f chars=%d",
+            "classified tier=%s difficulty=%.2f needs_tools=%.2f threshold=%.2f chars=%d",
             tier,
             score_value,
             tools_score,
+            settings.complex_score_at,
             len(text),
         )
         return tier
