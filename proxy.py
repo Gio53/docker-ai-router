@@ -66,7 +66,9 @@ class Settings:
         self.zai_base_url = os.environ.get(
             "ZAI_BASE_URL", "https://api.z.ai/api/paas/v4"
         )
-        self.zai_model = os.environ.get("ZAI_MODEL", "glm-5.3-flash")
+        self.zai_model = os.environ.get("ZAI_MODEL", "glm-5.2")
+        # Hermes/OpenAI clients expect delta.content; thinking streams often look empty.
+        self.zai_thinking = os.environ.get("ZAI_THINKING", "disabled").lower()
 
 
 settings: Settings | None = None
@@ -187,12 +189,20 @@ def response_headers(upstream: httpx.Response, tier: str) -> dict[str, str]:
 
 
 def prepare_zai_payload(payload: dict) -> dict:
-    """Normalize Z.ai payload for clients that only read delta.content."""
+    """Normalize Z.ai payload for OpenAI clients like Hermes."""
+    assert settings is not None
     out = dict(payload)
-    # glm-5.3-flash thinking cannot be disabled; keep streams readable for Hermes.
-    thinking = out.get("thinking")
-    if not isinstance(thinking, dict):
+    model = str(out.get("model") or settings.zai_model).lower()
+    # GLM-5.3 family uses forced thinking and rejects type=disabled.
+    forced_thinking = model.startswith("glm-5.3")
+    if isinstance(out.get("thinking"), dict):
+        return out
+    if forced_thinking:
         out["thinking"] = {"type": "enabled", "clear_thinking": False}
+    elif settings.zai_thinking in {"1", "true", "yes", "enabled", "on"}:
+        out["thinking"] = {"type": "enabled"}
+    else:
+        out["thinking"] = {"type": "disabled"}
     return out
 
 
