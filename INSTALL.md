@@ -69,9 +69,9 @@ No inbound API key is required; this is a local proxy.
 | `FREE_LLM_API_KEY` | yes | FreeLLMAPI key |
 | `FREE_LLM_BASE_URL` | yes | e.g. `http://192.168.1.204:3002/v1` |
 | `ZAI_API_KEY` | yes | Z.ai API key |
-| `ZAI_BASE_URL` | no | default `https://api.z.ai/api/paas/v4` |
-| `ZAI_MODEL` | no | default `glm-5.2` (Hermes-friendly; `glm-5.3-flash` forces thinking) |
-| `ZAI_THINKING` | no | default `disabled`; set `enabled` to turn thinking on for models that allow it |
+| `ZAI_BASE_URL` | no | default `https://api.z.ai/api/coding/paas/v4` (Coding Plan). General pay-as-you-go is `https://api.z.ai/api/paas/v4` |
+| `ZAI_MODEL` | no | default `glm-5.3-flash` (Coding Plan). `glm-5.2` is auto-routed to `glm-5.3` on Coding Plan |
+| `ZAI_THINKING` | no | default `disabled` when the model allows it; GLM-5.3 family forces thinking |
 | `LISTEN_HOST` | no | default `127.0.0.1` |
 | `LISTEN_PORT` | no | default `8081` (do not use 8080; Nextcloud uses it) |
 

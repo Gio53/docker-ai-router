@@ -62,11 +62,11 @@ class Settings:
         self.free_llm_api_key = os.environ["FREE_LLM_API_KEY"]
         self.free_llm_base_url = os.environ["FREE_LLM_BASE_URL"]
         self.zai_api_key = os.environ["ZAI_API_KEY"]
-        # Official OpenAI-compatible path is paas/v4, not api/openai/v1.
+        # Coding Plan quota uses /api/coding/paas/v4, not the general /api/paas/v4.
         self.zai_base_url = os.environ.get(
-            "ZAI_BASE_URL", "https://api.z.ai/api/paas/v4"
+            "ZAI_BASE_URL", "https://api.z.ai/api/coding/paas/v4"
         )
-        self.zai_model = os.environ.get("ZAI_MODEL", "glm-5.2")
+        self.zai_model = os.environ.get("ZAI_MODEL", "glm-5.3-flash")
         # Hermes/OpenAI clients expect delta.content; thinking streams often look empty.
         self.zai_thinking = os.environ.get("ZAI_THINKING", "disabled").lower()
 
