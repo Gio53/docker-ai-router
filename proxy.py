@@ -7,6 +7,7 @@ Complex requests go to Z.ai. The full message body is forwarded either way.
 from __future__ import annotations
 
 import asyncio
+import json
 import logging
 import os
 import sys
@@ -61,8 +62,9 @@ class Settings:
         self.free_llm_api_key = os.environ["FREE_LLM_API_KEY"]
         self.free_llm_base_url = os.environ["FREE_LLM_BASE_URL"]
         self.zai_api_key = os.environ["ZAI_API_KEY"]
+        # Official OpenAI-compatible path is paas/v4, not api/openai/v1.
         self.zai_base_url = os.environ.get(
-            "ZAI_BASE_URL", "https://api.z.ai/api/openai/v1"
+            "ZAI_BASE_URL", "https://api.z.ai/api/paas/v4"
         )
         self.zai_model = os.environ.get("ZAI_MODEL", "glm-5.3-flash")
 
@@ -184,6 +186,51 @@ def response_headers(upstream: httpx.Response, tier: str) -> dict[str, str]:
     return headers
 
 
+def prepare_zai_payload(payload: dict) -> dict:
+    """Normalize Z.ai payload for clients that only read delta.content."""
+    out = dict(payload)
+    # glm-5.3-flash thinking cannot be disabled; keep streams readable for Hermes.
+    thinking = out.get("thinking")
+    if not isinstance(thinking, dict):
+        out["thinking"] = {"type": "enabled", "clear_thinking": False}
+    return out
+
+
+def normalize_zai_sse_line(line: str) -> str:
+    """Map reasoning_content into content so OpenAI clients see visible text."""
+    if not line.startswith("data:"):
+        return line
+    data = line[5:].lstrip()
+    if not data or data == "[DONE]":
+        return line
+    try:
+        event = json.loads(data)
+    except Exception:
+        return line
+
+    changed = False
+    for choice in event.get("choices") or []:
+        delta = choice.get("delta")
+        if not isinstance(delta, dict):
+            continue
+        content = delta.get("content")
+        reasoning = delta.get("reasoning_content")
+        if (not content) and isinstance(reasoning, str) and reasoning:
+            delta["content"] = reasoning
+            changed = True
+        message = choice.get("message")
+        if isinstance(message, dict):
+            msg_content = message.get("content")
+            msg_reasoning = message.get("reasoning_content")
+            if (not msg_content) and isinstance(msg_reasoning, str) and msg_reasoning:
+                message["content"] = msg_reasoning
+                changed = True
+
+    if not changed:
+        return line
+    return "data: " + json.dumps(event, ensure_ascii=False)
+
+
 async def forward_complete(url: str, headers: dict, payload: dict, tier: str) -> Response:
     assert http_client is not None
     try:
@@ -191,6 +238,27 @@ async def forward_complete(url: str, headers: dict, payload: dict, tier: str) ->
     except httpx.HTTPError as exc:
         log.exception("Upstream request failed")
         return JSONResponse(error_body(f"Upstream request failed: {exc}", "api_error"), status_code=502)
+
+    if tier == "complex" and upstream.is_success:
+        try:
+            data = upstream.json()
+            for choice in data.get("choices") or []:
+                message = choice.get("message")
+                if not isinstance(message, dict):
+                    continue
+                if not message.get("content") and isinstance(
+                    message.get("reasoning_content"), str
+                ):
+                    message["content"] = message["reasoning_content"]
+            body = json.dumps(data, ensure_ascii=False).encode("utf-8")
+            return Response(
+                content=body,
+                status_code=upstream.status_code,
+                media_type="application/json",
+                headers=response_headers(upstream, tier),
+            )
+        except Exception:
+            log.exception("Failed to normalize Z.ai JSON response")
 
     content_type = upstream.headers.get("content-type", "application/json")
     return Response(
@@ -210,18 +278,47 @@ async def forward_stream(url: str, headers: dict, payload: dict, tier: str) -> R
         log.exception("Upstream stream failed")
         return JSONResponse(error_body(f"Upstream request failed: {exc}", "api_error"), status_code=502)
 
+    content_type = upstream.headers.get("content-type", "")
+    if upstream.status_code >= 400 or (
+        "text/event-stream" not in content_type and "json" in content_type
+    ):
+        error_bytes = await upstream.aread()
+        await upstream.aclose()
+        log.error(
+            "Upstream stream error status=%s body=%s",
+            upstream.status_code,
+            error_bytes[:500],
+        )
+        return Response(
+            content=error_bytes,
+            status_code=upstream.status_code,
+            media_type=(content_type.split(";")[0].strip() or "application/json"),
+            headers=response_headers(upstream, tier),
+        )
+
     async def body():
+        buffer = ""
         try:
-            async for chunk in upstream.aiter_bytes():
-                yield chunk
+            async for chunk in upstream.aiter_text():
+                if tier != "complex":
+                    yield chunk.encode("utf-8")
+                    continue
+                buffer += chunk
+                while "\n" in buffer:
+                    line, buffer = buffer.split("\n", 1)
+                    # Preserve bare newlines from upstream framing.
+                    fixed = normalize_zai_sse_line(line.rstrip("\r"))
+                    yield (fixed + "\n").encode("utf-8")
+            if buffer:
+                fixed = normalize_zai_sse_line(buffer.rstrip("\r"))
+                yield (fixed + "\n").encode("utf-8")
         finally:
             await upstream.aclose()
 
-    content_type = upstream.headers.get("content-type", "text/event-stream")
     return StreamingResponse(
         body(),
         status_code=upstream.status_code,
-        media_type=content_type.split(";")[0].strip(),
+        media_type="text/event-stream",
         headers=response_headers(upstream, tier),
     )
 
@@ -279,12 +376,16 @@ async def chat_completions(request: Request) -> Response:
     url, api_key, model = backend_for(tier)
     payload = dict(body)
     payload["model"] = model
+    if tier == "complex":
+        payload = prepare_zai_payload(payload)
     stream = bool(payload.get("stream"))
     headers = {
         "Authorization": f"Bearer {api_key}",
         "Content-Type": "application/json",
         "Accept": "text/event-stream" if stream else "application/json",
     }
+    if tier == "complex":
+        headers["Accept-Language"] = "en-US,en"
     log.info("forwarding tier=%s model=%s url=%s stream=%s", tier, model, url, stream)
 
     if stream:
