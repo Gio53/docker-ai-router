@@ -1,0 +1,311 @@
+"""Local OpenAI-compatible proxy that routes chat requests by complexity.
+
+Laya classifies the latest user message. Simple requests go to FreeLLMAPI.
+Complex requests go to Z.ai. The full message body is forwarded either way.
+"""
+
+from __future__ import annotations
+
+import asyncio
+import logging
+import os
+import sys
+from contextlib import asynccontextmanager
+from typing import Any
+
+import httpx
+import laya
+import uvicorn
+from fastapi import FastAPI, Request
+from fastapi.responses import JSONResponse, Response, StreamingResponse
+
+log = logging.getLogger("docker-ai-router")
+
+# router_questions difficulty levels: 0 trivial, 1 easy, 2 moderate, 3 hard.
+# Moderate and hard match multi-step debugging, review, and root-cause work.
+COMPLEX_SCORE_AT = 2.0
+COMPLEX_TOOLS_AT = 0.5
+
+# The English checkpoint fits 512 tokens, including the question text.
+# Classification sees only this excerpt. The upstream call gets the full body.
+CLASSIFY_HEAD_CHARS = 800
+CLASSIFY_TAIL_CHARS = 400
+
+HOP_BY_HOP = {
+    "connection",
+    "keep-alive",
+    "proxy-authenticate",
+    "proxy-authorization",
+    "te",
+    "trailers",
+    "transfer-encoding",
+    "upgrade",
+    "content-encoding",
+    "content-length",
+    "content-type",
+}
+
+REQUIRED_ENV = ("FREE_LLM_API_KEY", "FREE_LLM_BASE_URL", "ZAI_API_KEY")
+
+
+class Settings:
+    def __init__(self) -> None:
+        missing = [name for name in REQUIRED_ENV if not os.environ.get(name)]
+        if missing:
+            raise SystemExit(
+                "Missing required environment variables: " + ", ".join(missing)
+            )
+
+        self.listen_host = os.environ.get("LISTEN_HOST", "127.0.0.1")
+        self.listen_port = int(os.environ.get("LISTEN_PORT", "8080"))
+        self.free_llm_api_key = os.environ["FREE_LLM_API_KEY"]
+        self.free_llm_base_url = os.environ["FREE_LLM_BASE_URL"]
+        self.zai_api_key = os.environ["ZAI_API_KEY"]
+        self.zai_base_url = os.environ.get(
+            "ZAI_BASE_URL", "https://api.z.ai/api/openai/v1"
+        )
+        self.zai_model = os.environ.get("ZAI_MODEL", "glm-4.7-flash")
+
+
+settings: Settings | None = None
+agent: Any = None
+questions: dict | None = None
+http_client: httpx.AsyncClient | None = None
+classify_lock: asyncio.Lock | None = None
+
+
+def chat_completions_url(base_url: str) -> str:
+    base = base_url.rstrip("/")
+    if base.endswith("/chat/completions"):
+        return base
+    return f"{base}/chat/completions"
+
+
+def excerpt_for_classifier(text: str) -> str:
+    limit = CLASSIFY_HEAD_CHARS + CLASSIFY_TAIL_CHARS
+    if len(text) <= limit:
+        return text
+    head = text[:CLASSIFY_HEAD_CHARS]
+    tail = text[-CLASSIFY_TAIL_CHARS:]
+    return f"{head}\n...\n{tail}"
+
+
+def message_text(content: Any) -> str:
+    if isinstance(content, str):
+        return content
+    if isinstance(content, list):
+        parts: list[str] = []
+        for part in content:
+            if isinstance(part, str):
+                parts.append(part)
+            elif isinstance(part, dict):
+                text = part.get("text")
+                if isinstance(text, str):
+                    parts.append(text)
+        return "\n".join(parts)
+    if content is None:
+        return ""
+    return str(content)
+
+
+def latest_user_text(messages: list) -> str:
+    for message in reversed(messages):
+        if isinstance(message, dict) and message.get("role") == "user":
+            return message_text(message.get("content"))
+    last = messages[-1]
+    if isinstance(last, dict):
+        return message_text(last.get("content"))
+    return ""
+
+
+def classify(text: str) -> str:
+    """Return 'simple' or 'complex'. Failures route to the complex backend."""
+    excerpt = excerpt_for_classifier(text)
+    try:
+        result = agent.predict({"request": excerpt}, questions)
+        answers = result.get("answers") or {}
+        difficulty = answers.get("difficulty") or {}
+        needs_tools = answers.get("needs_tools") or {}
+        score = difficulty.get("score")
+        if score is None:
+            log.warning("Laya returned no difficulty score; routing to complex")
+            return "complex"
+        tools_score = float(needs_tools.get("noul") or 0.0)
+        score_value = float(score)
+        if score_value >= COMPLEX_SCORE_AT or tools_score >= COMPLEX_TOOLS_AT:
+            tier = "complex"
+        else:
+            tier = "simple"
+        log.info(
+            "classified tier=%s difficulty=%.2f needs_tools=%.2f chars=%d",
+            tier,
+            score_value,
+            tools_score,
+            len(text),
+        )
+        return tier
+    except Exception:
+        log.exception("Laya classification failed; routing to complex")
+        return "complex"
+
+
+async def classify_tier(text: str) -> str:
+    assert classify_lock is not None
+    async with classify_lock:
+        return await asyncio.to_thread(classify, text)
+
+
+def backend_for(tier: str) -> tuple[str, str, str]:
+    assert settings is not None
+    if tier == "simple":
+        return (
+            chat_completions_url(settings.free_llm_base_url),
+            settings.free_llm_api_key,
+            "auto",
+        )
+    return (
+        chat_completions_url(settings.zai_base_url),
+        settings.zai_api_key,
+        settings.zai_model,
+    )
+
+
+def error_body(message: str, error_type: str) -> dict:
+    return {"error": {"message": message, "type": error_type}}
+
+
+def response_headers(upstream: httpx.Response, tier: str) -> dict[str, str]:
+    headers = {
+        key: value
+        for key, value in upstream.headers.items()
+        if key.lower() not in HOP_BY_HOP
+    }
+    headers["X-Router-Tier"] = tier
+    return headers
+
+
+async def forward_complete(url: str, headers: dict, payload: dict, tier: str) -> Response:
+    assert http_client is not None
+    try:
+        upstream = await http_client.post(url, headers=headers, json=payload)
+    except httpx.HTTPError as exc:
+        log.exception("Upstream request failed")
+        return JSONResponse(error_body(f"Upstream request failed: {exc}", "api_error"), status_code=502)
+
+    content_type = upstream.headers.get("content-type", "application/json")
+    return Response(
+        content=upstream.content,
+        status_code=upstream.status_code,
+        media_type=content_type.split(";")[0].strip(),
+        headers=response_headers(upstream, tier),
+    )
+
+
+async def forward_stream(url: str, headers: dict, payload: dict, tier: str) -> Response:
+    assert http_client is not None
+    request = http_client.build_request("POST", url, headers=headers, json=payload)
+    try:
+        upstream = await http_client.send(request, stream=True)
+    except httpx.HTTPError as exc:
+        log.exception("Upstream stream failed")
+        return JSONResponse(error_body(f"Upstream request failed: {exc}", "api_error"), status_code=502)
+
+    async def body():
+        try:
+            async for chunk in upstream.aiter_bytes():
+                yield chunk
+        finally:
+            await upstream.aclose()
+
+    content_type = upstream.headers.get("content-type", "text/event-stream")
+    return StreamingResponse(
+        body(),
+        status_code=upstream.status_code,
+        media_type=content_type.split(";")[0].strip(),
+        headers=response_headers(upstream, tier),
+    )
+
+
+@asynccontextmanager
+async def lifespan(_app: FastAPI):
+    global agent, questions, http_client, classify_lock
+    if settings is None:
+        raise RuntimeError("Settings were not loaded before startup")
+
+    classify_lock = asyncio.Lock()
+    log.info("Loading Laya checkpoint convaiinnovations/laya")
+    agent = laya.load("convaiinnovations/laya")
+    questions = laya.router_questions()
+    http_client = httpx.AsyncClient(timeout=httpx.Timeout(600.0, connect=30.0))
+    log.info("Laya ready")
+    try:
+        yield
+    finally:
+        await http_client.aclose()
+
+
+app = FastAPI(lifespan=lifespan)
+
+
+@app.get("/health")
+async def health() -> dict:
+    return {"status": "ok"}
+
+
+@app.post("/v1/chat/completions")
+async def chat_completions(request: Request) -> Response:
+    try:
+        body = await request.json()
+    except Exception:
+        return JSONResponse(
+            error_body("Invalid JSON body", "invalid_request_error"),
+            status_code=400,
+        )
+
+    if not isinstance(body, dict):
+        return JSONResponse(
+            error_body("JSON body must be an object", "invalid_request_error"),
+            status_code=400,
+        )
+
+    messages = body.get("messages")
+    if not isinstance(messages, list) or not messages:
+        return JSONResponse(
+            error_body("messages must be a non-empty array", "invalid_request_error"),
+            status_code=400,
+        )
+
+    tier = await classify_tier(latest_user_text(messages))
+    url, api_key, model = backend_for(tier)
+    payload = dict(body)
+    payload["model"] = model
+    stream = bool(payload.get("stream"))
+    headers = {
+        "Authorization": f"Bearer {api_key}",
+        "Content-Type": "application/json",
+        "Accept": "text/event-stream" if stream else "application/json",
+    }
+    log.info("forwarding tier=%s model=%s url=%s stream=%s", tier, model, url, stream)
+
+    if stream:
+        return await forward_stream(url, headers, payload, tier)
+    return await forward_complete(url, headers, payload, tier)
+
+
+def main() -> None:
+    global settings
+    logging.basicConfig(
+        level=logging.INFO,
+        format="%(asctime)s %(levelname)s %(name)s %(message)s",
+        stream=sys.stdout,
+    )
+    try:
+        settings = Settings()
+    except ValueError as exc:
+        raise SystemExit(f"Invalid LISTEN_PORT: {exc}") from exc
+
+    uvicorn.run(app, host=settings.listen_host, port=settings.listen_port, log_level="info")
+
+
+if __name__ == "__main__":
+    main()

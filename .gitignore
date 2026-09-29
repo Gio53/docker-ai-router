@@ -1,0 +1,8 @@
+# Secrets — never commit
+docker-ai-router.env
+*.env
+.env
+__pycache__/
+.venv/
+venv/
+*.pyc

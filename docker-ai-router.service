@@ -1,0 +1,21 @@
+[Unit]
+Description=Local AI router proxy
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+WorkingDirectory=/opt/docker-ai-router
+# Secrets live in this file, not in the unit:
+# FREE_LLM_API_KEY, FREE_LLM_BASE_URL, ZAI_API_KEY
+# Optional: ZAI_BASE_URL, ZAI_MODEL, LISTEN_HOST, LISTEN_PORT
+EnvironmentFile=/etc/docker-ai-router.env
+Environment=PYTHONUNBUFFERED=1
+ExecStart=/opt/docker-ai-router/.venv/bin/python /opt/docker-ai-router/proxy.py
+Restart=on-failure
+RestartSec=5
+# First start downloads the Laya checkpoint and loads it into memory.
+TimeoutStartSec=300
+
+[Install]
+WantedBy=multi-user.target
