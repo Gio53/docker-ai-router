@@ -70,7 +70,7 @@ No inbound API key is required; this is a local proxy.
 | `FREE_LLM_BASE_URL` | yes | e.g. `http://192.168.1.204:3002/v1` |
 | `ZAI_API_KEY` | yes | Z.ai API key |
 | `ZAI_BASE_URL` | no | default `https://api.z.ai/api/openai/v1` |
-| `ZAI_MODEL` | no | default `glm-4.7-flash` |
+| `ZAI_MODEL` | no | default `glm-5.3-flash` |
 | `LISTEN_HOST` | no | default `127.0.0.1` |
 | `LISTEN_PORT` | no | default `8081` (do not use 8080; Nextcloud uses it) |
 

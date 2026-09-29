@@ -64,7 +64,7 @@ class Settings:
         self.zai_base_url = os.environ.get(
             "ZAI_BASE_URL", "https://api.z.ai/api/openai/v1"
         )
-        self.zai_model = os.environ.get("ZAI_MODEL", "glm-4.7-flash")
+        self.zai_model = os.environ.get("ZAI_MODEL", "glm-5.3-flash")
 
 
 settings: Settings | None = None
