@@ -72,6 +72,8 @@ No inbound API key is required; this is a local proxy.
 | `ZAI_BASE_URL` | no | default `https://api.z.ai/api/coding/paas/v4` (Coding Plan). General pay-as-you-go is `https://api.z.ai/api/paas/v4` |
 | `ZAI_MODEL` | no | default `glm-5.3-flash` (Coding Plan). `glm-5.2` is auto-routed to `glm-5.3` on Coding Plan |
 | `ZAI_THINKING` | no | default `disabled` when the model allows it; GLM-5.3 family forces thinking |
+| `ZAI_REASONING_EFFORT` | no | default `low` (faster). Use `medium`/`high`/`max` for harder tasks |
+| `ZAI_MAX_TOKENS` | no | default `4096` when the client omits a limit |
 | `LISTEN_HOST` | no | default `127.0.0.1` |
 | `LISTEN_PORT` | no | default `8081` (do not use 8080; Nextcloud uses it) |
 

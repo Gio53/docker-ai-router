@@ -69,6 +69,13 @@ class Settings:
         self.zai_model = os.environ.get("ZAI_MODEL", "glm-5.3-flash")
         # Hermes/OpenAI clients expect delta.content; thinking streams often look empty.
         self.zai_thinking = os.environ.get("ZAI_THINKING", "disabled").lower()
+        # GLM-5.3 defaults to max effort, which can take many minutes. Prefer faster.
+        self.zai_reasoning_effort = os.environ.get("ZAI_REASONING_EFFORT", "low")
+        max_tokens_raw = os.environ.get("ZAI_MAX_TOKENS", "4096")
+        try:
+            self.zai_max_tokens = int(max_tokens_raw) if max_tokens_raw else None
+        except ValueError as exc:
+            raise SystemExit(f"Invalid ZAI_MAX_TOKENS: {exc}") from exc
 
 
 settings: Settings | None = None
@@ -195,14 +202,27 @@ def prepare_zai_payload(payload: dict) -> dict:
     model = str(out.get("model") or settings.zai_model).lower()
     # GLM-5.3 family uses forced thinking and rejects type=disabled.
     forced_thinking = model.startswith("glm-5.3")
-    if isinstance(out.get("thinking"), dict):
-        return out
-    if forced_thinking:
-        out["thinking"] = {"type": "enabled", "clear_thinking": False}
-    elif settings.zai_thinking in {"1", "true", "yes", "enabled", "on"}:
-        out["thinking"] = {"type": "enabled"}
-    else:
-        out["thinking"] = {"type": "disabled"}
+    if not isinstance(out.get("thinking"), dict):
+        if forced_thinking:
+            out["thinking"] = {"type": "enabled", "clear_thinking": False}
+        elif settings.zai_thinking in {"1", "true", "yes", "enabled", "on"}:
+            out["thinking"] = {"type": "enabled"}
+        else:
+            out["thinking"] = {"type": "disabled"}
+
+    # Cap runaway generations unless the client already set a limit.
+    if settings.zai_max_tokens and not out.get("max_tokens") and not out.get("max_completion_tokens"):
+        out["max_tokens"] = settings.zai_max_tokens
+
+    # Only applies when thinking is enabled (forced on 5.3).
+    thinking = out.get("thinking")
+    if (
+        isinstance(thinking, dict)
+        and thinking.get("type") == "enabled"
+        and settings.zai_reasoning_effort
+        and "reasoning_effort" not in out
+    ):
+        out["reasoning_effort"] = settings.zai_reasoning_effort
     return out
 
 
