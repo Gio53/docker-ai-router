@@ -22,11 +22,12 @@ from fastapi.responses import JSONResponse, Response, StreamingResponse
 
 log = logging.getLogger("docker-ai-router")
 
-# Force Z.ai for game-panel server provisioning. Leave Lidarr/media and other
-# short Docker ops on FreeLLMAPI — Laya + score>=2 still handles real complexity.
+# Force Z.ai for Pelican Panel / Wings game-server provisioning only.
+# Media stack (Lidarr, Jellyfin, etc.) stays on FreeLLMAPI unless Laya score >= 2.
 DEFAULT_FORCE_COMPLEX = (
-    "pelican,wings,pelican panel,game server,minecraft server,"
-    "create a server,create new server,new game server,provision server"
+    "pelican,wings,pelican panel,pelican-eggs,yolks,"
+    "minecraft server,game server,create minecraft,new minecraft,"
+    "install egg,minecraft egg,server allocation"
 )
 
 # The English checkpoint fits 512 tokens, including the question text.
