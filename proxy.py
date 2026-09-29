@@ -22,14 +22,11 @@ from fastapi.responses import JSONResponse, Response, StreamingResponse
 
 log = logging.getLogger("docker-ai-router")
 
-# Default force-complex phrases for homelab / multi-step ops that Laya often
-# underscores as "easy" even though FreeLLMAPI struggles with them.
+# Force Z.ai for game-panel server provisioning. Leave Lidarr/media and other
+# short Docker ops on FreeLLMAPI — Laya + score>=2 still handles real complexity.
 DEFAULT_FORCE_COMPLEX = (
-    "minecraft,docker,proxmox,lidarr,sonarr,radarr,plex,jellyfin,"
-    "container,compose,portainer,nginx,caddy,traefik,reverse proxy,"
-    "firewall,ufw,iptables,wireguard,tailscale,vpn,"
-    "setup server,install server,deploy,systemd,lxc,vm,"
-    "port forward,open port,fix port,bind mount,volume"
+    "pelican,wings,pelican panel,game server,minecraft server,"
+    "create a server,create new server,new game server,provision server"
 )
 
 # The English checkpoint fits 512 tokens, including the question text.
@@ -97,8 +94,8 @@ class Settings:
         except ValueError as exc:
             raise SystemExit(f"Invalid ZAI_MAX_TOKENS: {exc}") from exc
 
-        # Laya score 0 trivial, 1 easy, 2 moderate, 3 hard. 1.5 catches "setup" work.
-        self.complex_score_at = _parse_float("ROUTER_COMPLEX_SCORE_AT", 1.5)
+        # Laya score 0 trivial, 1 easy, 2 moderate, 3 hard.
+        self.complex_score_at = _parse_float("ROUTER_COMPLEX_SCORE_AT", 2.0)
         self.complex_tools_at = _parse_float("ROUTER_COMPLEX_TOOLS_AT", 0.5)
         # Empty string disables keyword overrides; unset uses DEFAULT_FORCE_COMPLEX.
         self.force_complex_keywords = _parse_keywords(

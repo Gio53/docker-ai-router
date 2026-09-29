@@ -74,9 +74,9 @@ No inbound API key is required; this is a local proxy.
 | `ZAI_THINKING` | no | default `disabled` when the model allows it; GLM-5.3 family forces thinking |
 | `ZAI_REASONING_EFFORT` | no | default `low` (faster). Use `medium`/`high`/`max` for harder tasks |
 | `ZAI_MAX_TOKENS` | no | default `4096` when the client omits a limit |
-| `ROUTER_COMPLEX_SCORE_AT` | no | default `1.5` — Laya difficulty at/above this goes to Z.ai |
+| `ROUTER_COMPLEX_SCORE_AT` | no | default `2.0` — Laya difficulty at/above this goes to Z.ai |
 | `ROUTER_COMPLEX_TOOLS_AT` | no | default `0.5` — Laya needs_tools at/above this goes to Z.ai |
-| `ROUTER_FORCE_COMPLEX_KEYWORDS` | no | comma list forced to Z.ai; unset = built-in homelab list; empty = disable |
+| `ROUTER_FORCE_COMPLEX_KEYWORDS` | no | comma list forced to Z.ai; unset = Pelican/Wings/minecraft-server list; empty = disable |
 | `LISTEN_HOST` | no | default `127.0.0.1` |
 | `LISTEN_PORT` | no | default `8081` (do not use 8080; Nextcloud uses it) |
 
